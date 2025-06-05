@@ -1,19 +1,19 @@
 data:
-  image_dir: "/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/Images"
+  IMAGES_PATH: "/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/Images"
   captions_file: "/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/captions.txt"
 
 training:
-  vocab_freq: 5
-  batch_size: 32
-  embed_size: 256
-  hidden_size: 512
-  num_layers: 1
-  epochs: 100
-  learning_rate: 0.0001
+  VOCAB_SIZE: 10000
+  SEQ_LENGTH: 25
+  EMBED_DIM: 512
+  FF_DIM: 512
+  BATCH_SIZE: 64
+  EPOCHS: 1
 
 paths:
   vocab_file: "vocab.json"
   encoder_path: "../encoder.pth"
   decoder_path: "../decoder.pth"
 
-image_transfor:
+image_preprocessing:
+  IMAGE_SIZE: (299, 299)

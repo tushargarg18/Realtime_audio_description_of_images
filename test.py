@@ -1,142 +1,207 @@
-import torch
-from torchvision import transforms
-import torch.nn as nn
-import torch.optim as optim
-from torch.nn.utils.rnn import pack_padded_sequence
 import os
-from PIL import Image
-from torchvision import transforms
 
-from encoder_pretrained_multi_attention import CNNEncoderWithMHSA
-from decoder_transformer import TransformerDecoder
+os.environ["KERAS_BACKEND"] = "tensorflow"
+
+import re
+import numpy as np
+import matplotlib.pyplot as plt
+
+import tensorflow as tf
+import keras
+from keras import layers
 import yaml
-from vocabulary import Vocabulary
+from keras.applications import efficientnet
+from keras.layers import TextVectorization
+from image_loader import load_captions_data, train_val_split, custom_standardization, decode_and_resize
+from decoder import TransformerDecoderBlock
+from encoder import TransformerEncoderBlock, get_cnn_model, PositionalEmbedding
+from image_captioning_model import ImageCaptioningModel
+import pickle
+from keras.layers import TextVectorization
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#from train import LRSchedule
 
-# Read the configurations
-with open("src/config.yaml", "r") as f:
+from keras.models import load_model
+
+with open("EchoLens/src/config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
-# Read the vocabulary file
-vocab = Vocabulary()
-vocab.from_json("vocab.json")
+# Path to the images
+IMAGES_PATH = config["data"]["IMAGES_PATH"]
+# Desired image dimensions
+#IMAGE_SIZE = config["image_preprocessing"]["IMAGE_SIZE"]
+IMAGE_SIZE = (299, 299)
+# Vocabulary size
+VOCAB_SIZE = config["training"]["VOCAB_SIZE"]
+# Fixed length allowed for any sequence
+SEQ_LENGTH = config["training"]["SEQ_LENGTH"]
+# Dimension for the image embeddings and token embeddings
+EMBED_DIM = config["training"]["EMBED_DIM"]
+# Per-layer units in the feed-forward network
+FF_DIM = config["training"]["FF_DIM"]
+# Other training parameters
+BATCH_SIZE = config["training"]["BATCH_SIZE"]
+EPOCHS = config["training"]["EPOCHS"]
+AUTOTUNE = tf.data.AUTOTUNE
 
-#encoder = CNNEncoder()
-encoder = CNNEncoderWithMHSA(embed_size=256, attention_heads=2).to(device)
-decoder = TransformerDecoder(
-    embed_size=config["training"]["embed_size"],
-    vocab_size=len(vocab.word2idx),
-    num_heads=2,
-    num_layers=3,
-    #hidden_dim=512,
-    dropout=0.1
-    ).to(device)
 
-encoder.load_state_dict(torch.load("encoder.pth", map_location=device))
-decoder.load_state_dict(torch.load("decoder.pth", map_location=device))
+# Initialize the model
+image_augmentation = keras.Sequential(
+    [
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.2),
+        layers.RandomContrast(0.3),
+    ]
+    )
+checkpoint_path = "/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/caption_model.weights.h5"
+cnn_model = get_cnn_model()
+encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
+decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=2)
+caption_model = ImageCaptioningModel(
+cnn_model=cnn_model,
+encoder=encoder,
+decoder=decoder,
+image_aug=image_augmentation,
+)
+#caption_model = ImageCaptioningModel()
+caption_model.build([(None, 2048), (None, 20)])
+caption_model.load_weights(checkpoint_path)
 
-encoder.eval()
-decoder.eval()
+def custom_standardization(input_string):
+    strip_chars = r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"
+    strip_chars = strip_chars.replace("<", "")
+    strip_chars = strip_chars.replace(">", "")
+    lowercase = tf.strings.lower(input_string)
+    return tf.strings.regex_replace(lowercase, "[%s]" % re.escape(strip_chars), "")
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.485, 0.456, 0.406),
-                         (0.229, 0.224, 0.225))
-])
+# Initialize the TextVectorization layer
+with open("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/vectorization_layer_state.pkl", "rb") as f:
+    vectorization_loaded_data = pickle.load(f)
+config, vocab = vectorization_loaded_data['config'], vectorization_loaded_data['vocab']
+print(len(vectorization_loaded_data))
+print(vectorization_loaded_data.keys())
+print("vocab", len(vocab))
+print("config", config)
 
-def preprocess_image(image_path):
-    image = Image.open(image_path).convert("RGB")
-    image = transform(image).unsqueeze(0)  # shape: [1, 3, 224, 224]
-    return image.to(device)
 
-def generate_caption(image_tensor, encoder, decoder, vocab, max_length=20):
-    with torch.no_grad():
-        # Encode the image to get memory (encoder output)
-        memory = encoder(image_tensor)  # shape: [B, T_mem, E] or [1, seq_len, embed]
-        print("Encoder output shape before permute:", memory.shape)
-        # memory = memory.permute(1, 0, 2)  # [T_mem, B, E] for TransformerDecoder
-        # print("Encoder output shape after permute:", memory.shape)
 
-        # Initialize caption generation with <start>
-        caption = [vocab.word2idx["<start>"]]
+# if callable(config.get("standardize")): # Check if it's a function object
+#     config["standardize"] = 'custom_standardization' # Set it to the string name
 
-        for _ in range(max_length):
-            
-            targets = torch.tensor(caption).unsqueeze(1).to(device)  # [T, 1]
+# # The key is to provide the actual function object in `custom_objects`
+# # where the key is the name Keras expects (often the function's name as a string).
+# custom_objects = {
+#     "custom_standardization": 'custom_standardization',
+#     # It's good practice to also include the layer class itself if you're deserializing
+#     # a built-in layer, though often not strictly necessary if it's a standard Keras layer
+#     # and the module path is correct. Including it ensures it's found.
+#     #"TextVectorization": TextVectorization
+# }
 
-            if targets.shape[0] == 1:
-                tgt_input = targets  # First time: don't remove anything
-            else:
-                tgt_input = targets[:-1, :]  # Remove last token (the one to predict)
-            
-            tgt_seq_len = tgt_input.shape[0]
-            tgt_mask = TransformerDecoder.generate_square_subsequent_mask(tgt_seq_len, device)
-            #print(targets.size())
+# full_keras_object_config = {
+#         'class_name': 'TextVectorization', # The exact class name of the layer
+#         'config': config,                  # The internal config dictionary you loaded
+#         'module': 'keras.layers.preprocessing.text_vectorization', # The module path
+#         'vocabulary': vocab, # The vocabulary list
+#     }
 
-            #tgt_output = targets[:, 1:] # all tokens except first
+# standardize_arg_from_config = config.pop("standardize", None)
 
-            #tgt_input = tgt_input.permute(1, 0)     # shape [T, B]
-            #tgt_output = tgt_output.permute(1, 0)  # [T, B]
-        
-            #tgt_input = torch.tensor(caption).unsqueeze(1).to(device)  # [T, 1]
-            #tgt_mask = torch.nn.Transformer.generate_square_subsequent_mask(tgt_input.size(0)).to(device)  # [T, T]
+#     # Manually create the TextVectorization layer instance
+#     # Pass the actual custom_standardization function directly to the standardize argument
+#     # Use the remaining config items as kwargs
+# if standardize_arg_from_config == 'custom_standardization':
+#     # If the saved config indicated custom standardization, use the actual function
+#     vectorization = TextVectorization(standardize=custom_standardization, **config)
+# elif standardize_arg_from_config is not None:
+#     # If it was a built-in standardization string (e.g., 'lower_and_strip_punctuation')
+#     vectorization = TextVectorization(standardize=standardize_arg_from_config, **config)
+# else:
+#     # If standardize was not specified in the original config
+#     vectorization = TextVectorization(**config)
 
-            output = decoder(tgt_input, memory, tgt_mask)  # [T, 1, vocab_size]
-            if output.shape[0] == 0:
-                break  # Avoid indexing error if somehow empty
-            next_word_logits = output[-1, 0, :]  # take last token output
-            next_word_id = next_word_logits.argmax().item()
-            predicted_tokens = output.argmax(dim=-1)
-            print("Predicted tokens:", predicted_tokens[:, 0])  # batch first
+# print(vectorization.get_config())
 
-            if vocab.idx2word[next_word_id] == "<end>":
-                break
+# if weights and isinstance(weights, list) and len(weights) > 0:
+#         vocab_weights = weights[0] # The vocabulary list is usually the first item
+#         vectorization.set_vocabulary(vocab_weights)
+# else:
+#     print("Warning: Could not extract vocabulary from 'vectorizer.pkl'. TextVectorization table might not be fully initialized.")
 
-            caption.append(next_word_id)
+# vectorization = tf.keras.layers.deserialize(full_keras_object_config, custom_objects=custom_objects)
+# vectorization = TextVectorization.from_config(config, custom_objects=custom_objects)
+# vectorization.set_weights(weights)
 
-            # embeddings = decoder.embed(word).unsqueeze(1)  # (1, 1, embed_size)
-            # hiddens, states = decoder.lstm(embeddings, states)
-            # outputs = decoder.linear(hiddens.squeeze(1))  # (1, vocab_size)
-            # predicted = outputs.argmax(1)  # (1,)
-            # word = predicted
+vectorization = TextVectorization(
+    max_tokens=VOCAB_SIZE,
+    output_mode="int",
+    output_sequence_length=SEQ_LENGTH,
+    standardize=custom_standardization,
+    vocabulary=vocab,
+)
 
-            # predicted_word = vocab.idx2word[predicted.item()]
-            # if predicted_word == "<end>":
-            #     break
-            # caption.append(predicted_word)
-        
-        # Convert caption ids to words, skip <start>
-        caption_words = [vocab.idx2word[idx] for idx in caption[1:]]
-        return " ".join(caption_words)
+# vocab = vectorization.get_vocabulary()
+index_lookup = dict(zip(range(len(vocab)), vocab))
+max_decoded_sentence_length = SEQ_LENGTH - 1
 
-    return " ".join(caption)
+# Load the dataset
+captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/captions.txt")
 
-# /Users/tejfaster/Developer/Python/cv_project/EchoLens/src/image/pexels-souvenirpixels-414612.jpg
+# Split the dataset into training and validation sets
+train_data, valid_data = train_val_split(captions_mapping)
+print("Number of training samples: ", len(train_data))
+print("Number of validation samples: ", len(valid_data))
 
-image_path = "/mnt/d/DIT/First Sem/Computer Vision/EchoLens/Test_Data/Images/"
-images = os.listdir(image_path)
-#test_img = ["667626_18933d713e.jpg", "3747543364_bf5b548527.jpg"]
-#test_img = ["mQcKcyt3Nb25vMYBSbb47aQ9Kw.jpg", "pexels-souvenirpixels-414612.jpg"]
+valid_images = list(valid_data.keys())
 
-#3405942945_f4af2934a6.jpg
-#3091912922_0d6ebc8f6a.jpg
-#3463922449_f6040a2931.jpg
+def generate_caption():
+    # Select a random image from the validation dataset
+    sample_img = np.random.choice(valid_images)
 
-image_tensor = preprocess_image("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/Images/3091912922_0d6ebc8f6a.jpg")
-caption = generate_caption(image_tensor, encoder, decoder, vocab)
-print("Generated Caption 3091912922_0d6ebc8f6a.jpg:", caption)
-
-# for i in images:
-#     img_path = image_path + i
-#     image_tensor = preprocess_image(img_path)
-#     caption = generate_caption(image_tensor, encoder, decoder, vocab)
-#     print(f"Generated Caption {i}:", caption)
-#     #show_image_with_caption(img_path, caption)
-#     #break
-
+    # Read the image from the disk
+    sample_img = decode_and_resize(sample_img)
+    img = sample_img.numpy().clip(0, 255).astype(np.uint8)
+    print("Captioning image: ", img)
+    plt.imshow(img)
+    plt.show()
+    # Data augmentation for image data
     
+    #custom_objects = {'LRSchedule': LRSchedule}
+    #caption_model = load_model("caption_model.keras", custom_objects={
+    #"ImageCaptioningModel": ImageCaptioningModel,
+    #"LRSchedule": LRSchedule,
+    #})
+    #caption_model = keras.saving.load_model("caption_model.keras")
+
+    # Pass the image to the CNN
+    img = tf.expand_dims(sample_img, 0)
+    img = caption_model.cnn_model(img)
+
+    # Pass the image features to the Transformer encoder
+    encoded_img = caption_model.encoder(img, training=False)
+
+    # Generate the caption using the Transformer decoder
+    decoded_caption = "<start> "
+    for i in range(max_decoded_sentence_length):
+        tokenized_caption = vectorization([decoded_caption])[:, :-1]
+        mask = tf.math.not_equal(tokenized_caption, 0)
+        predictions = caption_model.decoder(
+            tokenized_caption, encoded_img, training=False, mask=mask
+        )
+        print("prediction", predictions.shape)
+        sampled_token_index = np.argmax(predictions[0, i, :])
+        
+        sampled_token = index_lookup.get(sampled_token_index, "<unk>")
+        if sampled_token == "<end>":
+            break
+        decoded_caption += " " + sampled_token
+
+    decoded_caption = decoded_caption.replace("<start> ", "")
+    decoded_caption = decoded_caption.replace(" <end>", "").strip()
+    print("Predicted Caption: ", decoded_caption)
 
 
-
+# Check predictions for a few samples
+generate_caption()
+generate_caption()
+generate_caption()
