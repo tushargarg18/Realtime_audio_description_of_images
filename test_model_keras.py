@@ -13,6 +13,12 @@ import yaml
 from keras.applications import efficientnet
 from keras.layers import TextVectorization
 import pickle
+import pyttsx3
+
+def speak(text):
+    engine = pyttsx3.init()
+    engine.say(text)
+    engine.runAndWait()
 
 keras.utils.set_random_seed(111)
 
@@ -491,6 +497,29 @@ class ImageCaptioningModel(keras.Model):
             image_aug=image_aug,
             **config  # base keras.Model args like name, dtype, trainable
         )
+    
+    def build(self, input_shape, seq_len=SEQ_LENGTH):
+        # input_shape is a tuple like (batch_size, height, width, channels)
+        dummy_images = tf.zeros(input_shape)
+        
+        if self.image_aug:
+            dummy_images = self.image_aug(dummy_images)
+        
+        # 1. Pass through CNN to get image embeddings
+        img_embed = self.cnn_model(dummy_images)
+        
+        # 2. Pass through encoder
+        encoder_out = self.encoder(img_embed, training=False)
+        
+        # 3. Create dummy caption input: (batch_size, seq_len)
+        dummy_caption = tf.zeros((input_shape[0], seq_len), dtype=tf.int32)
+        dummy_mask = tf.ones_like(dummy_caption, dtype=tf.bool)
+        
+        # 4. Pass through decoder
+        _ = self.decoder(dummy_caption, encoder_out, training=False, mask=dummy_mask)
+
+        # Now the model is built
+        super().build(input_shape)
 
 cnn_model = get_cnn_model()
 encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
@@ -540,6 +569,8 @@ lr_schedule = LRSchedule(post_warmup_learning_rate=1e-4, warmup_steps=num_warmup
 caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
 #caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
 
+#inputcaption_model.build(input_shape=(4, 299, 299, 3))  # batch size 4, Inception-style input
+
 # # Fit the model
 # caption_model.fit(
 #     train_dataset,
@@ -556,13 +587,16 @@ caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
 # print("vocab", len(vocab))
 # print("config", config)
 
-caption_model.build(input_shape=[(None, 2048), (None, 20)])
-
 #caption_model.load_weights('caption_model.weights.h5')
 
 #caption_model.evaluate(valid_dataset)
 
+caption_model.build(input_shape=(4, 299, 299, 3))  # batch size 4, Inception-style
+
 caption_model = keras.models.load_model("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/caption_model.keras")
+
+
+
 
 with open("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/vectorization_layer_state.pkl", "rb") as f:
     vectorization_loaded_data = pickle.load(f)
@@ -575,13 +609,14 @@ max_decoded_sentence_length = SEQ_LENGTH - 1
 valid_images = list(valid_data.keys())
 
 
-def generate_caption():
+def generate_caption(img_path):
     # Select a random image from the validation dataset
-    sample_img = np.random.choice(valid_images)
+    #sample_img = np.random.choice(valid_images)
 
     # Read the image from the disk
-    sample_img = decode_and_resize(sample_img)
+    sample_img = decode_and_resize(img_path)
     img = sample_img.numpy().clip(0, 255).astype(np.uint8)
+    print("Img path: ", img_path)
     plt.imshow(img)
     plt.show()
 
@@ -609,9 +644,10 @@ def generate_caption():
     decoded_caption = decoded_caption.replace("<start> ", "")
     decoded_caption = decoded_caption.replace(" <end>", "").strip()
     print("Predicted Caption: ", decoded_caption)
+    speak(decoded_caption)
 
 
 # Check predictions for a few samples
-generate_caption()
-generate_caption()
-generate_caption()
+generate_caption("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/Teen-Boys-Playing-Basketball.jpg")
+# generate_caption()
+# generate_caption()

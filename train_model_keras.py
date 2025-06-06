@@ -59,7 +59,7 @@ def load_captions_data(filename):
             line = line.rstrip("\n")
             # Image name and captions are separated using a tab
             img_name, caption = line.strip().lower().split(",", 1)
-            img_name = '/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/Images/' + img_name
+            img_name = '/mnt/d/DIT/First Sem/Computer Vision/EchoLens/Fliker_30K/Images/' + img_name
             # Each image is repeated five times for the five different captions.
             # Each image name has a suffix `#(caption_number)`
             # img_name = img_name.split("#")[0]
@@ -123,7 +123,7 @@ def train_val_split(caption_data, train_size=0.8, shuffle=True):
 
 
 # Load the dataset
-captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/captions.txt")
+captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/Fliker_30K/captions.txt")
 
 # Split the dataset into training and validation sets
 train_data, valid_data = train_val_split(captions_mapping)
@@ -492,7 +492,7 @@ class ImageCaptioningModel(keras.Model):
             **config  # base keras.Model args like name, dtype, trainable
         )
     
-    def build(self, input_shape):
+    def build(self, input_shape, seq_len=SEQ_LENGTH):
         # input_shape is a tuple like (batch_size, height, width, channels)
         dummy_images = tf.zeros(input_shape)
         
@@ -503,15 +503,14 @@ class ImageCaptioningModel(keras.Model):
         img_embed = self.cnn_model(dummy_images)
         
         # 2. Pass through encoder
-        encoder_out = self.encoder(img_embed)
+        encoder_out = self.encoder(img_embed, training=False)
         
         # 3. Create dummy caption input: (batch_size, seq_len)
-        batch_size = input_shape[0]
-        seq_len = 20  # arbitrary caption length (you can make this configurable)
-        dummy_caption = tf.zeros((batch_size, seq_len), dtype=tf.int32)
+        dummy_caption = tf.zeros((input_shape[0], seq_len), dtype=tf.int32)
+        dummy_mask = tf.ones_like(dummy_caption, dtype=tf.bool)
         
         # 4. Pass through decoder
-        _ = self.decoder(dummy_caption, encoder_out, training=False, mask=tf.ones_like(dummy_caption, dtype=tf.bool))
+        _ = self.decoder(dummy_caption, encoder_out, training=False, mask=dummy_mask)
 
         # Now the model is built
         super().build(input_shape)
