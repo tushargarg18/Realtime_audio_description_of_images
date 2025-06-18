@@ -38,6 +38,9 @@ EPOCHS = config["training"]["EPOCHS"]
 AUTOTUNE = tf.data.AUTOTUNE
 
 
+# -----------------------------------------------------------------------------------------------
+# Caption Text Processing & Data Preparation
+# -----------------------------------------------------------------------------------------------
 def load_captions_data(filename):
     """Loads captions (text) data and maps them to corresponding images.
 
@@ -59,11 +62,7 @@ def load_captions_data(filename):
             line = line.rstrip("\n")
             # Image name and captions are separated using a tab
             img_name, caption = line.strip().lower().split(",", 1)
-            img_name = '/mnt/d/DIT/First Sem/Computer Vision/EchoLens/Fliker_30K/Images/' + img_name
-            # Each image is repeated five times for the five different captions.
-            # Each image name has a suffix `#(caption_number)`
-            # img_name = img_name.split("#")[0]
-            # img_name = os.path.join(IMAGES_PATH, img_name.strip())
+            img_name = '/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/Images/' + img_name
 
             # We will remove caption that are either too short to too long
             tokens = caption.strip().split()
@@ -101,14 +100,14 @@ def train_val_split(caption_data, train_size=0.8, shuffle=True):
         Traning and validation datasets as two separated dicts
     """
 
-    # 1. Get the list of all image names
+    # Get the list of all image names
     all_images = list(caption_data.keys())
 
-    # 2. Shuffle if necessary
+    # Shuffle if necessary
     if shuffle:
         np.random.shuffle(all_images)
 
-    # 3. Split into training and validation sets
+    # Split into training and validation sets
     train_size = int(len(caption_data) * train_size)
 
     training_data = {
@@ -118,12 +117,12 @@ def train_val_split(caption_data, train_size=0.8, shuffle=True):
         img_name: caption_data[img_name] for img_name in all_images[train_size:]
     }
 
-    # 4. Return the splits
+    # Return the splits
     return training_data, validation_data
 
 
 # Load the dataset
-captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/Fliker_30K/captions.txt")
+captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/captions.txt")
 
 # Split the dataset into training and validation sets
 train_data, valid_data = train_val_split(captions_mapping)
@@ -132,14 +131,26 @@ print("Number of validation samples: ", len(valid_data))
 
 
 def custom_standardization(input_string):
+    """
+    Applies custom text standardization by converting text to lowercase
+    and removing specified characters using regular expressions.
+
+    Args:
+        input_string (tf.Tensor): A scalar string tensor (typically a line of text).
+
+    Returns:
+        tf.Tensor: A standardized string tensor with lowercase letters and stripped characters.
+    """
     lowercase = tf.strings.lower(input_string)
     return tf.strings.regex_replace(lowercase, "[%s]" % re.escape(strip_chars), "")
 
-
+# Define the characters to strip from the text
 strip_chars = r"!\"#$%&'()*+,-./:;<=>?@[\]^_`{|}~"
 strip_chars = strip_chars.replace("<", "")
 strip_chars = strip_chars.replace(">", "")
 
+# Create a TextVectorization layer
+# This layer will convert text to sequences of integers
 vectorization = TextVectorization(
     max_tokens=VOCAB_SIZE,
     output_mode="int",
@@ -157,7 +168,17 @@ image_augmentation = keras.Sequential(
     ]
 )
 
+
 def decode_and_resize(img_path):
+    """
+    Reads an image from a file path, decodes it, resizes it, and normalizes pixel values.
+
+    Args:
+        img_path (tf.Tensor): A scalar string tensor representing the file path to the image.
+
+    Returns:
+        tf.Tensor: A float32 tensor of shape (IMAGE_SIZE[0], IMAGE_SIZE[1], 3) with pixel values in [0, 1].
+    """
     img = tf.io.read_file(img_path)
     img = tf.image.decode_jpeg(img, channels=3)
     img = tf.image.resize(img, IMAGE_SIZE)
@@ -166,15 +187,36 @@ def decode_and_resize(img_path):
 
 
 def process_input(img_path, captions):
+    """
+    Processes a single data sample consisting of an image path and its corresponding caption.
+
+    Args:
+        img_path (tf.Tensor): A scalar string tensor representing the path to an image file.
+        captions (tf.Tensor): A scalar string tensor containing the text caption for the image.
+
+    Returns:
+        Tuple[tf.Tensor, tf.Tensor]: A tuple containing:
+            - The preprocessed image tensor (float32, resized, normalized).
+            - The vectorized caption tensor (integer sequence).
+    """
     return decode_and_resize(img_path), vectorization(captions)
 
 
 def make_dataset(images, captions):
+    """
+    Creates a TensorFlow dataset pipeline from lists of image paths and captions.
+
+    Args:
+        images (List[str] or tf.Tensor): List or tensor of image file paths.
+        captions (List[str] or tf.Tensor): List or tensor of corresponding image captions.
+
+    Returns:
+        tf.data.Dataset: A batched, shuffled, and preprocessed dataset ready for training.
+    """
     dataset = tf.data.Dataset.from_tensor_slices((images, captions))
     dataset = dataset.shuffle(BATCH_SIZE * 8)
     dataset = dataset.map(process_input, num_parallel_calls=AUTOTUNE)
     dataset = dataset.batch(BATCH_SIZE).prefetch(AUTOTUNE)
-
     return dataset
 
 
@@ -182,8 +224,19 @@ def make_dataset(images, captions):
 train_dataset = make_dataset(list(train_data.keys()), list(train_data.values()))
 
 valid_dataset = make_dataset(list(valid_data.keys()), list(valid_data.values()))
+# -----------------------------------------------------------------------------------------------
 
+# -----------------------------------------------------------------------------------------------
+# Encoder Block
+# -----------------------------------------------------------------------------------------------
 def get_cnn_model():
+    """
+    Loads a pre-trained EfficientNetB0 model, freezes its weights, and adapts its output
+    for use in image captioning by reshaping the feature map.
+
+    Returns:
+        keras.Model: A CNN model that outputs a reshaped feature map of the input image.
+    """
     base_model = efficientnet.EfficientNetB0(
         input_shape=(*IMAGE_SIZE, 3),
         include_top=False,
@@ -198,6 +251,22 @@ def get_cnn_model():
 
 @keras.utils.register_keras_serializable()
 class TransformerEncoderBlock(layers.Layer):
+    """
+    A custom Transformer encoder block with:
+    - Layer normalization before attention and feedforward layers (Pre-LN architecture)
+    - Multi-head self-attention
+    - Position-wise dense feedforward layer
+
+    This block can be stacked to form a Transformer encoder.
+
+    Args:
+        embed_dim (int): Dimensionality of the input embeddings.
+        dense_dim (int): Dimensionality of the internal dense layer (unused in current code but often used in FFN).
+        num_heads (int): Number of attention heads.
+
+    Methods:
+        call(inputs, training, mask=None): Forward pass through the encoder block.
+    """
     def __init__(self, embed_dim, dense_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
         self.embed_dim = embed_dim
@@ -211,6 +280,17 @@ class TransformerEncoderBlock(layers.Layer):
         self.dense_1 = layers.Dense(embed_dim, activation="relu")
 
     def call(self, inputs, training, mask=None):
+        """
+        Forward pass of the Transformer Encoder Block.
+
+        Args:
+            inputs (tf.Tensor): Input tensor of shape (batch_size, seq_len, embed_dim)
+            training (bool): Flag indicating training mode (for dropout, if used)
+            mask (tf.Tensor or None): Optional attention mask (currently unused)
+
+        Returns:
+            tf.Tensor: Output tensor of shape (batch_size, seq_len, embed_dim)
+        """
         inputs = self.layernorm_1(inputs)
         inputs = self.dense_1(inputs)
 
@@ -226,6 +306,20 @@ class TransformerEncoderBlock(layers.Layer):
 
 @keras.utils.register_keras_serializable()
 class PositionalEmbedding(layers.Layer):
+    """
+    This layer combines token embeddings with learned positional embeddings.
+    It maps input token IDs to embeddings and adds positional information
+    so the model can understand token order.
+
+    Args:
+        sequence_length (int): Maximum length of input sequences.
+        vocab_size (int): Size of the vocabulary (number of unique tokens).
+        embed_dim (int): Dimensionality of the token embeddings.
+
+    Methods:
+        call(inputs): Computes combined token and position embeddings.
+        compute_mask(inputs, mask=None): Creates a mask to ignore padding tokens.
+    """
     def __init__(self, sequence_length, vocab_size, embed_dim, **kwargs):
         super().__init__(**kwargs)
         self.token_embeddings = layers.Embedding(
@@ -240,6 +334,15 @@ class PositionalEmbedding(layers.Layer):
         self.embed_scale = tf.math.sqrt(tf.cast(embed_dim, tf.float32))
 
     def call(self, inputs):
+        """
+        Forward pass for the positional embedding layer.
+
+        Args:
+            inputs (tf.Tensor): Tensor of shape (batch_size, seq_len) with token IDs.
+
+        Returns:
+            tf.Tensor: Combined token + position embeddings, shape (batch_size, seq_len, embed_dim).
+        """
         length = tf.shape(inputs)[-1]
         positions = tf.range(start=0, limit=length, delta=1)
         embedded_tokens = self.token_embeddings(inputs)
@@ -248,10 +351,41 @@ class PositionalEmbedding(layers.Layer):
         return embedded_tokens + embedded_positions
 
     def compute_mask(self, inputs, mask=None):
-        return tf.math.not_equal(inputs, 0)
+        """
+        Compute the mask tensor to ignore padding tokens (assumed to be 0).
 
+        Args:
+            inputs (tf.Tensor): Input token IDs.
+
+        Returns:
+            tf.Tensor: Boolean mask tensor where True indicates non-padding tokens.
+        """
+        return tf.math.not_equal(inputs, 0)
+# -----------------------------------------------------------------------------------------------
+
+
+# -----------------------------------------------------------------------------------------------
+# Decoder Block
+# -----------------------------------------------------------------------------------------------
 @keras.utils.register_keras_serializable()
 class TransformerDecoderBlock(layers.Layer):
+    """
+    Transformer Decoder Block that includes:
+    - Positional embedding layer for inputs
+    - Masked multi-head self-attention (causal attention to prevent future lookahead)
+    - Multi-head attention over encoder outputs (encoder-decoder attention)
+    - Feed-forward network with dropout and residual connections
+    - Layer normalizations applied pre/post attention and FFN layers
+
+    Args:
+        embed_dim (int): Dimensionality of embeddings.
+        ff_dim (int): Dimensionality of the feed-forward network intermediate layer.
+        num_heads (int): Number of attention heads.
+
+    Methods:
+        call(inputs, encoder_outputs, training, mask=None): Forward pass.
+        get_causal_attention_mask(inputs): Generates mask to prevent attention to future tokens.
+    """
     def __init__(self, embed_dim, ff_dim, num_heads, **kwargs):
         super().__init__(**kwargs)
         self.embed_dim = embed_dim
@@ -282,6 +416,18 @@ class TransformerDecoderBlock(layers.Layer):
         self.supports_masking = True
 
     def call(self, inputs, encoder_outputs, training, mask=None):
+        """
+        Forward pass of the Transformer decoder block.
+
+        Args:
+            inputs (tf.Tensor): Decoder input token IDs (batch_size, seq_len).
+            encoder_outputs (tf.Tensor): Output from encoder (batch_size, enc_seq_len, embed_dim).
+            training (bool): Whether in training mode (enables dropout).
+            mask (tf.Tensor or None): Padding mask for inputs.
+
+        Returns:
+            tf.Tensor: Predicted token probabilities (batch_size, seq_len, vocab_size).
+        """
         inputs = self.embedding(inputs)
         causal_mask = self.get_causal_attention_mask(inputs)
 
@@ -318,6 +464,16 @@ class TransformerDecoderBlock(layers.Layer):
         return preds
 
     def get_causal_attention_mask(self, inputs):
+        """
+        Generate a causal mask to prevent attention to future tokens.
+
+        Args:
+            inputs (tf.Tensor): Input tensor (batch_size, seq_len, embed_dim).
+
+        Returns:
+            tf.Tensor: A mask tensor of shape (batch_size, seq_len, seq_len) where
+                       positions corresponding to future tokens are masked out.
+        """
         input_shape = tf.shape(inputs)
         batch_size, sequence_length = input_shape[0], input_shape[1]
         i = tf.range(sequence_length)[:, tf.newaxis]
@@ -333,8 +489,15 @@ class TransformerDecoderBlock(layers.Layer):
         )
         return tf.tile(mask, mult)
 
+
 @keras.utils.register_keras_serializable()
 class ImageCaptioningModel(keras.Model):
+    """
+    Custom Keras Model for Image Captioning.
+    Combines a CNN-based image encoder, a sequence encoder, and a decoder
+    to generate captions for images. Supports training on multiple captions
+    per image, optional image augmentation, and handles loss and accuracy metrics.
+    """
     def __init__(
         self,
         cnn_model,
@@ -354,12 +517,34 @@ class ImageCaptioningModel(keras.Model):
         self.image_aug = image_aug
 
     def calculate_loss(self, y_true, y_pred, mask):
+        """
+        Compute the masked loss between true and predicted captions.
+
+        Args:
+            y_true: Ground truth sequences.
+            y_pred: Predicted sequences (logits or probabilities).
+            mask: Boolean mask indicating valid tokens (non-padding).
+
+        Returns:
+            Scalar loss value averaged over valid tokens.
+        """
         loss = self.loss(y_true, y_pred)
         mask = tf.cast(mask, dtype=loss.dtype)
         loss *= mask
         return tf.reduce_sum(loss) / tf.reduce_sum(mask)
 
     def calculate_accuracy(self, y_true, y_pred, mask):
+        """
+        Compute the masked accuracy between true and predicted captions.
+
+        Args:
+            y_true: Ground truth sequences.
+            y_pred: Predicted sequences (logits or probabilities).
+            mask: Boolean mask indicating valid tokens (non-padding).
+
+        Returns:
+            Scalar accuracy value averaged over valid tokens.
+        """
         accuracy = tf.equal(y_true, tf.argmax(y_pred, axis=2))
         accuracy = tf.math.logical_and(mask, accuracy)
         accuracy = tf.cast(accuracy, dtype=tf.float32)
@@ -367,6 +552,17 @@ class ImageCaptioningModel(keras.Model):
         return tf.reduce_sum(accuracy) / tf.reduce_sum(mask)
 
     def _compute_caption_loss_and_acc(self, img_embed, batch_seq, training=True):
+        """
+        Helper function to compute loss and accuracy for a batch of captions.
+
+        Args:
+            img_embed: Image embeddings from the CNN.
+            batch_seq: Batch of captions (token sequences).
+            training: Whether the call is for training or inference.
+
+        Returns:
+            Tuple of (loss, accuracy) for the batch.
+        """
         encoder_out = self.encoder(img_embed, training=training)
         batch_seq_inp = batch_seq[:, :-1]
         batch_seq_true = batch_seq[:, 1:]
@@ -379,6 +575,15 @@ class ImageCaptioningModel(keras.Model):
         return loss, acc
 
     def train_step(self, batch_data):
+        """
+        Custom training step implementation.
+
+        Args:
+            batch_data: Tuple of (images, captions) for the batch.
+
+        Returns:
+            Dictionary with loss and accuracy metrics.
+        """
         batch_img, batch_seq = batch_data
         batch_loss = 0
         batch_acc = 0
@@ -425,6 +630,15 @@ class ImageCaptioningModel(keras.Model):
         }
 
     def test_step(self, batch_data):
+        """
+        Custom testing/validation step implementation.
+
+        Args:
+            batch_data: Tuple of (images, captions) for the batch.
+
+        Returns:
+            Dictionary with loss and accuracy metrics.
+        """
         batch_img, batch_seq = batch_data
         batch_loss = 0
         batch_acc = 0
@@ -458,11 +672,23 @@ class ImageCaptioningModel(keras.Model):
 
     @property
     def metrics(self):
+        """
+        List of metrics to reset at the start of each epoch.
+
+        Returns:
+            List of Keras metrics.
+        """
         # We need to list our metrics here so the `reset_states()` can be
         # called automatically.
         return [self.loss_tracker, self.acc_tracker]
     
     def get_config(self):
+        """
+        Return the configuration of the model for saving and loading.
+
+        Returns:
+            Dictionary containing model configuration.
+        """
         config = super().get_config()
         config.update({
             "cnn_model": keras.saving.serialize_keras_object(self.cnn_model),
@@ -475,6 +701,15 @@ class ImageCaptioningModel(keras.Model):
 
     @classmethod
     def from_config(cls, config):
+        """
+        Instantiate the model from its configuration dictionary.
+
+        Args:
+            config: Configuration dictionary.
+
+        Returns:
+            An instance of ImageCaptioningModel.
+        """
         # Extract and deserialize components
         cnn_model = keras.saving.deserialize_keras_object(config.pop("cnn_model"))
         encoder = keras.saving.deserialize_keras_object(config.pop("encoder"))
@@ -493,6 +728,13 @@ class ImageCaptioningModel(keras.Model):
         )
     
     def build(self, input_shape, seq_len=SEQ_LENGTH):
+        """
+        Builds the model by running dummy data through all components.
+
+        Args:
+            input_shape: Shape tuple of the image input (batch, H, W, C).
+            seq_len: Sequence length of captions (default SEQ_LENGTH).
+        """
         # input_shape is a tuple like (batch_size, height, width, channels)
         dummy_images = tf.zeros(input_shape)
         
@@ -514,8 +756,9 @@ class ImageCaptioningModel(keras.Model):
 
         # Now the model is built
         super().build(input_shape)
+#--- --------------------------------------------------------------------------------------------
 
-
+# Initialize the model
 cnn_model = get_cnn_model()
 encoder = TransformerEncoderBlock(embed_dim=EMBED_DIM, dense_dim=FF_DIM, num_heads=1)
 decoder = TransformerDecoderBlock(embed_dim=EMBED_DIM, ff_dim=FF_DIM, num_heads=2)
@@ -533,10 +776,11 @@ cross_entropy = keras.losses.SparseCategoricalCrossentropy(
 )
 
 # EarlyStopping criteria
-early_stopping = keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True)
+#early_stopping = keras.callbacks.EarlyStopping(patience=3, restore_best_weights=True)
 
 
 # Learning Rate Scheduler for the optimizer
+@keras.utils.register_keras_serializable()
 class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, post_warmup_learning_rate, warmup_steps):
         super().__init__()
@@ -553,6 +797,15 @@ class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             lambda: warmup_learning_rate,
             lambda: self.post_warmup_learning_rate,
         )
+    def get_config(self):
+        return {
+            "post_warmup_learning_rate": float(self.post_warmup_learning_rate),
+            "warmup_steps": int(self.warmup_steps),
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 # Create a learning rate schedule
@@ -561,8 +814,8 @@ num_warmup_steps = num_train_steps // 15
 lr_schedule = LRSchedule(post_warmup_learning_rate=1e-4, warmup_steps=num_warmup_steps)
 
 # Compile the model
-caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
-#caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
+#caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
+caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
 
 caption_model.build(input_shape=(4, 299, 299, 3))  # batch size 4, Inception-style input
 #caption_model.build(input_shape=[(None, 2048), (None, 20)])
@@ -572,7 +825,7 @@ caption_model.fit(
     train_dataset,
     epochs=EPOCHS,
     validation_data=valid_dataset,
-    callbacks=[early_stopping],
+    #callbacks=[early_stopping],
 )
 
 
