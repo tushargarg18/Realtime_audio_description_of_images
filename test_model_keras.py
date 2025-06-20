@@ -14,6 +14,9 @@ from keras.applications import efficientnet
 from keras.layers import TextVectorization
 import pickle
 import pyttsx3
+import cv2
+import time
+import matplotlib.pyplot as plt
 
 def speak(text):
     engine = pyttsx3.init()
@@ -22,7 +25,7 @@ def speak(text):
 
 keras.utils.set_random_seed(111)
 
-with open("EchoLens/src/config.yaml", "r") as f:
+with open("D:\DIT\First Sem\Computer Vision\EchoLens-Pretrained-Windows\src\config.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 # Path to the images
@@ -55,7 +58,7 @@ def load_captions_data(filename):
         text_data: List containing all the available captions
     """
 
-    with open(filename) as caption_file:
+    with open(filename, encoding="utf8") as caption_file:
         caption_data = caption_file.readlines()
         caption_mapping = {}
         text_data = []
@@ -129,7 +132,7 @@ def train_val_split(caption_data, train_size=0.8, shuffle=True):
 
 
 # Load the dataset
-captions_mapping, text_data = load_captions_data("/mnt/d/DIT/First Sem/Computer Vision/EchoLens/DataSet/captions.txt")
+captions_mapping, text_data = load_captions_data("D:\DIT\First Sem\Computer Vision\EchoLens\DataSet\captions.txt")
 
 # Split the dataset into training and validation sets
 train_data, valid_data = train_val_split(captions_mapping)
@@ -165,6 +168,8 @@ image_augmentation = keras.Sequential(
 
 def decode_and_resize(img_path):
     img = tf.io.read_file(img_path)
+    #img_raw = tf.convert_to_tensor(img_input, dtype=tf.float32)
+    #img_raw = tf.io.read_file(img_input)
     img = tf.image.decode_jpeg(img, channels=3)
     img = tf.image.resize(img, IMAGE_SIZE)
     img = tf.image.convert_image_dtype(img, tf.float32)
@@ -542,6 +547,7 @@ early_stopping = keras.callbacks.EarlyStopping(patience=3, restore_best_weights=
 
 
 # Learning Rate Scheduler for the optimizer
+@keras.utils.register_keras_serializable()
 class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, post_warmup_learning_rate, warmup_steps):
         super().__init__()
@@ -558,6 +564,16 @@ class LRSchedule(keras.optimizers.schedules.LearningRateSchedule):
             lambda: warmup_learning_rate,
             lambda: self.post_warmup_learning_rate,
         )
+    
+    def get_config(self):
+        return {
+            "post_warmup_learning_rate": float(self.post_warmup_learning_rate),
+            "warmup_steps": int(self.warmup_steps),
+        }
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 # Create a learning rate schedule
@@ -566,8 +582,8 @@ num_warmup_steps = num_train_steps // 15
 lr_schedule = LRSchedule(post_warmup_learning_rate=1e-4, warmup_steps=num_warmup_steps)
 
 # Compile the model
-caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
-#caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
+#caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
+caption_model.compile(optimizer=keras.optimizers.Adam(lr_schedule), loss=cross_entropy)
 
 #inputcaption_model.build(input_shape=(4, 299, 299, 3))  # batch size 4, Inception-style input
 
@@ -593,12 +609,12 @@ caption_model.compile(optimizer=keras.optimizers.Adam(), loss=cross_entropy)
 
 caption_model.build(input_shape=(4, 299, 299, 3))  # batch size 4, Inception-style
 
-caption_model = keras.models.load_model("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/caption_model.keras")
+caption_model = keras.models.load_model(r"D:\DIT\First Sem\Computer Vision\EchoLens-Pretrained-Windows\src\caption_model_30_epochs.keras")
 
 
 
 
-with open("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/vectorization_layer_state.pkl", "rb") as f:
+with open(r"D:\DIT\First Sem\Computer Vision\EchoLens-Pretrained-Windows\src\vectorization_layer_state.pkl", "rb") as f:
     vectorization_loaded_data = pickle.load(f)
 config, vocab = vectorization_loaded_data['config'], vectorization_loaded_data['vocab']
 print("vocab", len(vocab))
@@ -617,8 +633,8 @@ def generate_caption(img_path):
     sample_img = decode_and_resize(img_path)
     img = sample_img.numpy().clip(0, 255).astype(np.uint8)
     print("Img path: ", img_path)
-    plt.imshow(img)
-    plt.show()
+    # plt.imshow(img)
+    # plt.show()
 
     # Pass the image to the CNN
     img = tf.expand_dims(sample_img, 0)
@@ -644,10 +660,71 @@ def generate_caption(img_path):
     decoded_caption = decoded_caption.replace("<start> ", "")
     decoded_caption = decoded_caption.replace(" <end>", "").strip()
     print("Predicted Caption: ", decoded_caption)
-    speak(decoded_caption)
+    return decoded_caption
+    #speak(decoded_caption)
+
+folder_path = r"D:\DIT\First Sem\Computer Vision\EchoLens-Pretrained-Windows\Real_World_Images"
+
+# Option 2: Using escaped backslashes
+# folder_path = "D:\\DIT\\First Sem\\Computer Vision\\EchoLens-Pretrained-Windows\\Real_World_Images"
+
+# Option 3: Using forward slashes (also works on Windows)
+# folder_path = "D:/DIT/First Sem/Computer Vision/EchoLens-Pretrained-Windows/Real_World_Images"
+
+# for i in os.listdir(folder_path):
+#     if i.endswith(".jpg"):
+#         print("Image:", i)
+#         generate_caption(os.path.join(folder_path, i))
+#         #cv2.imshow("Image", cv2.imread(os.path.join(folder_path, i)))
+#         #cv2.waitKey(0)
+
+#cv2.destroyAllWindows()
+
+
+cap = cv2.VideoCapture(0)
+prev_caption = ""
+
+
+def is_blurry(image, threshold=50.0):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    cv2.imshow("Frame", lap_var)
+    return lap_var < threshold
+
+while True:
+    ret, frame = cap.read()
+    img = cv2.resize(frame, (299,299))
+    #img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    #hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    
+    #  # Wait for a while before generating the next caption
+
+    if is_blurry(frame):
+        cv2.imshow("Frame", frame)
+        cv2.putText(frame, "Skipping blurry frame...", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        continue
+
+    cv2.imshow("Frame", img)
+    cv2.imwrite("temp_img.jpg", frame)
+    #time.sleep(1)
+    current_caption = generate_caption("temp_img.jpg")
+    #time.sleep(1)
+    if prev_caption != current_caption:
+        speak(current_caption)
+        print("Speaking: ", current_caption)
+        time.sleep(1)
+    prev_caption = current_caption
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
 
 
 # Check predictions for a few samples
-generate_caption("/mnt/d/DIT/First Sem/Computer Vision/EchoLens-Pretrained/Teen-Boys-Playing-Basketball.jpg")
+
 # generate_caption()
 # generate_caption()
