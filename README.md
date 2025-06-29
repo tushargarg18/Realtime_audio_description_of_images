@@ -34,3 +34,10 @@ Capture real-time images to generate accurate captions and convert text to speec
 - On-device visual preprocessing (scene parsing, face/object detection) with real-time audio feedback via text-to-speech.
 - Make sure the pipeline is optimized for offline operation, minimal latency, and low power consumption
 
+## Training the model
+1. Run the train.py code to train the model on the required data set.
+2. Call the trained model and the vectorized vocabulary in the image_captioning.py file to generate captions from the video feed.
+
+## Dataset
+Fliker30k - https://datasets.activeloop.ai/docs/ml/datasets/flickr30k-dataset/
+
